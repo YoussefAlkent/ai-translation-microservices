@@ -1,0 +1,353 @@
+version: '3.9'
+
+x-common-config: &common-config
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+  restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        cpus: '0.5'
+        memory: 512M
+      reservations:
+        cpus: '0.25'
+        memory: 256M
+  tmpfs:
+    - /tmp
+
+services:
+  load_balancer:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway:
+        condition: service_started
+      user-service:
+        condition: service_started  # Add dependency on user-service
+    networks:
+      - microservices-network
+      - app-network
+      - db-network  # Add db-network to access user-service
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s  # Increase start period
+    restart: unless-stopped  # Add explicit restart policy
+
+  gateway:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SUMMARIZER_URL=http://summarizer:8000
+      - TRANSLATOR_URL=http://e2a-translator:8000
+      - JAEGER_HOST=jaeger
+      - JAEGER_PORT=6831
+      - MAX_RETRIES=5
+      - RETRY_DELAY=5
+    networks:
+      - microservices-network
+    depends_on:
+      jaeger:
+        condition: service_started
+      summarizer:
+        condition: service_started
+      e2a-translator:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  summarizer:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Text_Summerizer/Dockerfile
+    environment:
+      - OLLAMA_API_URL=http://host.docker.internal:11434
+      - MODEL_NAME=llama3.2:3b
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    networks:
+      - microservices-network
+      - kafka-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "service.name=summarizer"
+      - "service.version=${VERSION:-latest}"
+    deploy:
+      replicas: 2
+
+  e2a-translator:  # Renamed from translator
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: English2Arabic_Translator/Dockerfile
+    deploy:
+      replicas: 3  # Increased replicas for load balancing
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+    environment:
+      - OLLAMA_API_URL=http://host.docker.internal:11434
+      - MODEL_NAME=llama3.2:3b
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SERVICE_NAME=e2a_translator
+    networks:
+      - microservices-network
+      - kafka-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "service.name=e2a_translator"
+      - "service.version=${VERSION:-latest}"
+
+  a2e-translator:
+    <<: *common-config
+    build:
+      context: .
+      dockerfile: Arabic2English_Translator/Dockerfile
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+    environment:
+      - OLLAMA_API_URL=http://host.docker.internal:11434
+      - MODEL_NAME=llama3.2:3b
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SERVICE_NAME=a2e_translator
+    networks:
+      - microservices-network
+      - kafka-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "service.name=a2e_translator"
+      - "service.version=${VERSION:-latest}"
+
+  user-service:
+    <<: *common-config
+    build:
+      context: ./User-Service
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/userdb
+      - PORT=3001
+      - SUPERTOKENS_URI=http://supertokens:3567
+      - SUPERTOKENS_API_KEY=${SUPERTOKENS_API_KEY}
+    ports:
+      - "3001:3001"  # Make sure port is consistent
+    depends_on:
+      postgres:
+        condition: service_healthy
+      supertokens:
+        condition: service_started
+    networks:
+      - db-network
+      - app-network
+      - microservices-network  # Add this network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  zookeeper:
+    <<: *common-config
+    image: bitnami/zookeeper:latest
+    platform: linux/arm64/v8
+    ports:
+      - "2181:2181"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+    command: 
+      - /opt/bitnami/scripts/zookeeper/run.sh
+    healthcheck:
+      test: ["CMD-SHELL", "echo stat | nc localhost 2181"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - kafka-network
+
+  kafka:
+    <<: *common-config
+    image: bitnami/kafka:latest
+    platform: linux/arm64/v8
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://0.0.0.0:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+    volumes:
+      - kafka_data:/bitnami/kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server=localhost:9092 --list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - kafka-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    <<: *common-config
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    networks:
+      - microservices-network
+
+  grafana:
+    image: grafana/grafana:latest
+    <<: *common-config
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - microservices-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+      - "16686:16686"  # UI
+    networks:
+      - microservices-network
+
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      - POSTGRES_DB=userdb
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./User-Service/db/init:/docker-entrypoint-initdb.d  # Add this line
+    ports:
+      - "5432:5432"
+    networks:
+      - db-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  supertokens:
+    image: registry.supertokens.io/supertokens/supertokens-postgresql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRESQL_CONNECTION_URI=postgresql://postgres:postgres@postgres:5432/userdb
+      - API_KEYS=${SUPERTOKENS_API_KEY}
+      - API_KEY_DYNAMIC=${SUPERTOKENS_API_KEY_DYNAMIC}
+    networks:
+      - db-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3567/hello"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "admin@admin.com"
+      PGADMIN_DEFAULT_PASSWORD: "admin"
+    ports:
+      - "5050:80"
+    networks:
+      - db-network
+    depends_on:
+      - postgres
+
+networks:
+  microservices-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+  kafka-network:
+    name: kafka-network
+    driver: bridge
+  db-network:
+    driver: bridge
+  app-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.21.0.0/16
+
+volumes:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:
+  prometheus_data:
+  grafana_data:
+  postgres_data:

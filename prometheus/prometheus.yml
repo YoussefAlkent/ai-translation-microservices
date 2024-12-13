@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'summarizer'
+    static_configs:
+      - targets: ['summarizer:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'e2a_translator'  # Changed from 'translator'
+    static_configs:
+      - targets: ['translator:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['gateway:8080']
+    metrics_path: '/metrics'
+
+  - job_name: 'a2e_translator'
+    static_configs:
+      - targets: ['a2e-translator:8000']
+    metrics_path: '/metrics'
