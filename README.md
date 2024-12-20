@@ -1,147 +1,75 @@
-# AI-Powered Text Processing Microservices
+# AI Translation Micro-Services Project
 
-A robust microservices architecture providing advanced text summarization and bidirectional English-Arabic translation using state-of-the-art AI models.
+## Description
+A application project that provides text summarization and translation services. The project includes multiple microservices for handling different functionalities such as text summarization, English to Arabic translation, and Arabic to English translation.
 
-## Table of Contents
-- [AI-Powered Text Processing Microservices](#ai-powered-text-processing-microservices)
-  - [Table of Contents](#table-of-contents)
-  - [Services Overview](#services-overview)
-  - [Architecture](#architecture)
-  - [Prerequisites](#prerequisites)
-  - [Deployment](#deployment)
-  - [API Reference](#api-reference)
-    - [Summarization](#summarization)
-    - [Translation](#translation)
-  - [Monitoring](#monitoring)
-  - [Development](#development)
-  - [Troubleshooting](#troubleshooting)
-  - [License](#license)
+## Features
+- **Text Summarization**: Summarize large texts into concise summaries with different styles (formal, informal, technical, executive, creative).
+- **English to Arabic Translation**: Translate English text to Arabic with different levels of formality (formal, neutral, informal).
+- **Arabic to English Translation**: Translate Arabic text to English with different levels of formality (formal, neutral, informal).
 
-## Services Overview
-
-Detailed breakdown of each service:
-
-- **Gateway Service** (Port 8080)
-  - Route management and load balancing
-  - Request validation and rate limiting
-  - API documentation (Swagger UI)
-  - Authentication and authorization
-
-- **Summarizer Service** (Internal Port 8000)
-  - AI-powered text summarization
-  - Multiple summarization styles
-  - Caching layer for improved performance
-  - Bulk processing capabilities
-
-- **Translator Service** (Internal Port 8000)
-  - Bidirectional English-Arabic translation
-  - Context-aware translations
-  - Terminology consistency
-  - Custom dictionary support
-
-- **Supporting Infrastructure**
-  - Kafka (Port 9094): Async message processing
-  - Redis (Port 6379): Caching and rate limiting
-  - Prometheus (Port 9090): Metrics collection
-  - Grafana (Port 3000): Visualization and alerting
-
-## Architecture
-
-```
-┌─────────┐     ┌───────────┐     ┌──────────────┐
-│ Client  │────▶│  Gateway  │────▶│ Summarizer   │
-└─────────┘     │  (nginx)  │     └──────────────┘
-                │           │     ┌──────────────┐
-                │           │────▶│ Translator   │
-                └───────────┘     └──────────────┘
-                     │           ┌──────────────┐
-                     └──────────▶│    Redis     │
-                     │           └──────────────┘
-                     │           ┌──────────────┐
-                     └──────────▶│    Kafka     │
-                                └──────────────┘
-                     │           ┌──────────────┐
-                     └──────────▶│ Prometheus   │
-                                └──────────────┘
-```
-
-## Prerequisites
-
-- Docker Engine 20.10+
-- Docker Compose 2.0+
-- 8GB RAM minimum
-- 20GB disk space
-
-## Deployment
-
-1. **Clone and Deploy**
+## Installation
 ```bash
-git clone <repository-url>
-cd Cloud\ Project
-docker-compose up -d
+# Clone the repository
+git clone https://github.com/yourusername/cloud-project.git
+
+# Navigate to the project directory
+cd cloud-project
+
+# Install dependencies
+npm install
+
+# Start the services using Docker Compose
+docker-compose up --build
 ```
 
-2. **Verify Services**
+## Usage
 ```bash
-docker-compose ps
-curl http://localhost:8080/health
+# Access the application at http://localhost:4200 for the frontend
+# Access the API Gateway at http://localhost:8080
 ```
 
-3. **Scale Services (Optional)**
-```bash
-docker-compose up -d --scale summarizer=3 --scale translator=2
-```
+## Microservices
+- **Text Summarizer**: Handles text summarization requests.
+- **English to Arabic Translator**: Handles translation from English to Arabic.
+- **Arabic to English Translator**: Handles translation from Arabic to English.
+- **API Gateway**: Routes requests to the appropriate microservice.
+- **User Service**: Manages user authentication and authorization.
 
-## API Reference
+## Environment Variables
+The following environment variables are used in the project:
 
-### Summarization
-```bash
-curl -X POST http://localhost:8080/api/v1/summarize \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Your long text here...",
-    "style": "formal",
-    "max_length": 500
-  }'
-```
+- `OLLAMA_API_URL`: URL for the Ollama API.
+- `MODEL_NAME`: Name of the model used for text generation.
+- `KAFKA_BOOTSTRAP_SERVERS`: Kafka bootstrap servers.
+- `JAEGER_HOST`: Host for Jaeger tracing.
+- `DATABASE_URL`: Database connection URL for the user service.
+- `SUPERTOKENS_API_KEY`: API key for SuperTokens.
+- `SUPERTOKENS_API_KEY_DYNAMIC`: Dynamic API key for SuperTokens.
 
-### Translation
-```bash
-curl -X POST http://localhost:8080/api/v1/translate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Hello, how are you?",
-    "formality": "formal"
-  }'
-```
+## API Endpoints
+### Text Summarizer
+- `POST /api/v1/summarize`: Summarize text.
+- `GET /api/v1/summarize/status/{request_id}`: Get the status of a summarization request.
 
-## Monitoring
+### English to Arabic Translator
+- `POST /api/v1/translate/english-to-arabic`: Translate English text to Arabic.
+- `GET /api/v1/translate/english-to-arabic/status/{request_id}`: Get the status of an English to Arabic translation request.
 
-Access monitoring tools:
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000 (admin/admin)
+### Arabic to English Translator
+- `POST /api/v1/translate/arabic-to-english`: Translate Arabic text to English.
+- `GET /api/v1/translate/arabic-to-english/status/{request_id}`: Get the status of an Arabic to English translation request.
 
-## Development
+### User Service
+- `POST /auth/signup`: Sign up a new user.
+- `POST /auth/signin`: Sign in an existing user.
 
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Troubleshooting
-
-```bash
-# View logs
-docker-compose logs -f <service-name>
-
-# Restart services
-docker-compose restart <service-name>
-
-# Reset everything
-docker-compose down && docker-compose up -d
-```
+## Contributing
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the Branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ## License
-
-MIT License
+This project is licensed under the MIT License - see the LICENSE file for details.
