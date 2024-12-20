@@ -11,13 +11,10 @@ A application project that provides text summarization and translation services.
 ## Installation
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/cloud-project.git
+git clone https://github.com/AdhamAfis/ai-transltion-microservices
 
 # Navigate to the project directory
-cd cloud-project
-
-# Install dependencies
-npm install
+cd ai-transltion-microservices
 
 # Start the services using Docker Compose
 docker-compose up --build
