@@ -325,6 +325,29 @@ services:
     depends_on:
       - postgres
 
+  frontend:
+    <<: *common-config
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "4200:4200"  # Changed from 3000:3000
+    environment:
+      - NODE_ENV=production
+      - API_URL=http://localhost:80
+      - PORT=4200
+    depends_on:
+      - load_balancer
+      - gateway
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
 networks:
   microservices-network:
     driver: bridge
