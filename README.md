@@ -50,12 +50,12 @@ The following environment variables are used in the project:
 - `GET /api/v1/summarize/status/{request_id}`: Get the status of a summarization request.
 
 ### English to Arabic Translator
-- `POST /api/v1/translate/english-to-arabic`: Translate English text to Arabic.
-- `GET /api/v1/translate/english-to-arabic/status/{request_id}`: Get the status of an English to Arabic translation request.
+- `POST /api/v1/translate/en2ar`: Translate English text to Arabic.
+- `GET /api/v1/translate/ean2er/status/{request_id}`: Get the status of an English to Arabic translation request.
 
 ### Arabic to English Translator
-- `POST /api/v1/translate/arabic-to-english`: Translate Arabic text to English.
-- `GET /api/v1/translate/arabic-to-english/status/{request_id}`: Get the status of an Arabic to English translation request.
+- `POST /api/v1/translate/an2er`: Translate Arabic text to English.
+- `GET /api/v1/translate/an2er/status/{request_id}`: Get the status of an Arabic to English translation request.
 
 ### User Service
 - `POST /auth/signup`: Sign up a new user.
