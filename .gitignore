@@ -65,6 +65,7 @@ kafka_data/
 zookeeper_data/
 prometheus_data/
 grafana_data/
+*/model
 
 # OS specific
 .DS_Store

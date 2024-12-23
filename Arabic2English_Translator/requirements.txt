@@ -1,10 +1,12 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 python-dotenv==1.0.0
-kafka-python==2.0.2
-pydantic==1.10.13
+confluent-kafka==2.7.0
+pydantic==2.10.0
 python-multipart==0.0.6
-ollama==0.1.4
 cachetools==4.2.4
 prometheus-client==0.17.1
 circuitbreaker==1.4.0
+transformers==4.47.1
+torch==2.5.1
+sacremoses==0.1.1

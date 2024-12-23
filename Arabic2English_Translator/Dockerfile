@@ -13,6 +13,7 @@ COPY shared/ /app/shared/
 # Copy only requirements first for better caching
 COPY Arabic2English_Translator/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt --compile
+RUN python init_model.py
 
 COPY Arabic2English_Translator/ .
 ENV PYTHONUNBUFFERED=1
