@@ -11,7 +11,7 @@ RUN pip config set global.index-url https://pypi.org/simple/ \
 COPY shared/ /app/shared/
 
 # Copy only requirements first for better caching
-COPY ./requirements.txt .
+COPY English2Arabic_Translator/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt --compile
 RUN python init_model.py
 
