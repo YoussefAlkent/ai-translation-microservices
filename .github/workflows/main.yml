@@ -13,15 +13,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # Step 1: Checkout the repository
     - name: Checkout code
       uses: actions/checkout@v3
 
-    # Step 2: Set up Docker
+    - name: Free up storage
+      run: |
+        # Remove preinstalled tool cache
+        sudo rm -rf /opt/hostedtoolcache
+
+        # Clear APT cache
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+
+        # Remove unused Docker resources
+        docker system prune -af --volumes
+
+        # Clear specific caches (if applicable)
+        rm -rf ~/.npm ~/.cache/pip
+
+        # Print available disk space for debugging
+        df -h
+
     - name: Set up Docker
       uses: docker/setup-buildx-action@v2
 
-    # Step 3: Build and tag Docker containers using Docker Compose
     - name: Build containers
       run: |
         docker compose -f docker-compose.yml build
