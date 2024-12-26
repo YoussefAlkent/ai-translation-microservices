@@ -8,9 +8,6 @@ RUN apt-get update && apt-get install -y curl && \
 # Install Ollama CLI and dependencies
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
-# Preload the model
-RUN ollama pull llama3.2:3b
-
 # Copy shared module first
 COPY shared/ /app/shared/
 
