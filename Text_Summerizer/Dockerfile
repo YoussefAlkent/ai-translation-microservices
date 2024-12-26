@@ -1,11 +1,12 @@
-FROM python:3.9-slim
+# Use a Python base image
+FROM python:3.11-slim
 
-WORKDIR /app
+# Install dependencies
+RUN apt-get update && apt-get install -y curl && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Add pip configuration for faster installs
-RUN pip config set global.index-url https://pypi.org/simple/ \
-    && pip config set global.trusted-host pypi.org \
-    && pip install --upgrade pip
+# Install Ollama CLI and dependencies
+RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # Copy shared module first
 COPY shared/ /app/shared/
@@ -14,7 +15,13 @@ COPY shared/ /app/shared/
 COPY Text_Summerizer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt --compile
 
+# Copy entrypoint script
+COPY Text_Summerizer/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 COPY Text_Summerizer/ .
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "app.py"]
+# Use entrypoint script to orchestrate services
+CMD ["/entrypoint.sh"]
+
