@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y curl && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama CLI and dependencies
-RUN curl -fsSL https://ollama-download-url | bash
+RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # Preload the model
 RUN ollama pull llama3.2:3b
