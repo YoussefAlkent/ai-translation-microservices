@@ -18,8 +18,13 @@ COPY shared/ /app/shared/
 COPY Text_Summerizer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt --compile
 
+# Copy entrypoint script
+COPY Text_Summerizer/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 COPY Text_Summerizer/ .
 ENV PYTHONUNBUFFERED=1
 
-# Run both services
-CMD ollama serve & python app.py
+# Use entrypoint script to orchestrate services
+CMD ["/entrypoint.sh"]
+
