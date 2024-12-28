@@ -1,9 +1,6 @@
-fastapi
-uvicorn
-httpx
-slowapi
-prometheus-client
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-exporter-otlp-proto-http
-opentelemetry-instrumentation-fastapi
+fastapi==0.95.2
+pydantic==1.10.9
+confluent-kafka==1.9.2
+python-dotenv==1.0.0
+requests==2.31.0
+uvicorn==0.22.0

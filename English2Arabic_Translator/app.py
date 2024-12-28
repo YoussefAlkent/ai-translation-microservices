@@ -2,8 +2,7 @@ from fastapi import FastAPI, APIRouter, BackgroundTasks, HTTPException, Request
 from shared.base_service import BaseService
 from fastapi.middleware.gzip import GZipMiddleware
 from cachetools import TTLCache
-from confluent_kafka import Producer  # Changed import to confluent_kafka
-from confluent_kafka import KafkaError  # Changed import to confluent_kafka
+from confluent_kafka import Producer, Consumer, KafkaError  # Updated imports
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import hashlib
@@ -15,6 +14,7 @@ import os
 from contextlib import asynccontextmanager
 from circuitbreaker import circuit
 import uuid
+from threading import Thread
 from transformers import MarianMTModel, MarianTokenizer
 
 load_dotenv()
@@ -22,7 +22,7 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup Script
-    app.state.kafka_producer = await init_kafka()
+    app.state.kafka_producer = await init_kafka_producer()
     logger.info("[SUCCESS:E2A] Kafka producer initialized")
     yield
 
@@ -46,6 +46,9 @@ model = MarianMTModel.from_pretrained(os.getenv('MODEL_DIRECTORY', './model'))
 tokenizer = MarianTokenizer.from_pretrained(os.getenv('MODEL_DIRECTORY', './model'))
 
 class TranslationRequest(BaseModel):
+    correlation_id: str
+    user_id: str
+    chat_id: str
     text: str
 
 class TranslationStatus(BaseModel):
@@ -54,11 +57,11 @@ class TranslationStatus(BaseModel):
     result: dict = None
     error: str = None
 
-#TODO: Replace with Redis
+# TODO: Replace with Redis
 translation_status = {}
 
 @circuit(failure_threshold=5, recovery_timeout=60)
-def generate_translation(prompt:str) -> str:
+def generate_translation(prompt: str) -> str:
     with service.request_latency.time():
         try:
             inputs = tokenizer([prompt], return_tensors="pt", padding=True)
@@ -69,7 +72,7 @@ def generate_translation(prompt:str) -> str:
             logger.error(f"Translation generation error: {str(e)}")
             raise
 
-async def init_kafka():
+async def init_kafka_producer():
     try:
         # Initialize KafkaProducer from confluent_kafka
         conf = {
@@ -80,15 +83,28 @@ async def init_kafka():
         producer = Producer(conf)
         return producer
     except KafkaError as e:
-        logger.error(f"Kafka initialization error: {e}")
+        logger.error(f"Kafka producer initialization error: {e}")
+        return None
+
+async def init_kafka_consumer():
+    try:
+        conf = {
+            'bootstrap.servers': os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092'),
+            'group.id': os.getenv('KAFKA_CONSUMER_GROUP', 'e2a-consumer-group'),
+            'auto.offset.reset': 'earliest',
+        }
+        consumer = Consumer(conf)
+        consumer.subscribe([os.getenv('KAFKA_E2A_TRANSLATION_TOPIC', 'e2a-translation')])
+        return consumer
+    except KafkaError as e:
+        logger.error(f"Kafka consumer initialization error: {e}")
         return None
 
 async def send_to_kafka(producer, message):
     if not producer:
         return
     try:
-        # Use producer.produce instead of producer.send
-        producer.produce('translator_requests', value=json.dumps(message), callback=delivery_report)
+        producer.produce(os.getenv('KAFKA_E2A_TRANSLATION_RESPONSE', 'e2a-translation-response'), value=json.dumps(message), callback=delivery_report)
         producer.flush()
     except Exception as e:
         logger.error(f"Kafka send error: {e}")
@@ -98,6 +114,47 @@ def delivery_report(err, msg):
         logger.error(f"Message delivery failed: {err}")
     else:
         logger.info(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+
+def consume_and_process_kafka_messages(consumer, producer):
+    while True:
+        try:
+            msg = consumer.poll(timeout=1.0)
+            if msg is None:  # No message
+                continue
+            if msg.error():
+                if msg.error().code() != KafkaError._PARTITION_EOF:
+                    logger.error(f"Kafka consumer error: {msg.error()}")
+                continue
+
+            # Process the consumed message
+            message = json.loads(msg.value().decode('utf-8'))
+            logger.info(f"Consumed message: {message}")
+
+            # Extract data
+            request_data = message.value
+            request = TranslationRequest(**request_data)
+
+            if not user_id or not chat_id or not text:
+                logger.error("Invalid message format received, skipping.")
+                continue
+
+            # Generate translation
+            prompt = f">>ara<< {request.text}"
+            translation = generate_translation(prompt)
+
+            # Send the result to the response topic
+            result = {
+                'correlation_id': request.correlation_id,
+                "user_id": request.user_id,
+                "chat_id": request.chat_id,
+                "text": request.text,
+                "translation": translation,
+            }
+            send_to_kafka(producer, result)
+            logger.info(f"Produced response for message: {result}")
+
+        except Exception as e:
+            logger.error(f"Error processing Kafka message: {e}")
 
 @api_router.post("/translate/en2ar")
 async def translate_text(request: TranslationRequest, background_tasks: BackgroundTasks):
@@ -157,14 +214,28 @@ async def process_translation(request: TranslationRequest, request_id: str, cach
             await send_to_kafka(
                 app.state.kafka_producer,
                 {
+                    'user_id': request.user_id,
+                    'chat_id': request.chat_id,
                     'text': request.text,
-                    'timestamp': time.time(),
-                    'cache_key': cache_key
+                    'translation': result["translation"],
                 }
             )
         translation_status[request_id] = {"status": "completed", "result": result}
     except Exception as e:
         translation_status[request_id] = {"status": "error", "error": str(e)}
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting Kafka consumers...")
+
+    consumer = await init_kafka_consumer()
+    producer = app.state.kafka_producer
+
+    if consumer and producer:
+        consumer_thread = Thread(target=consume_and_process_kafka_messages, args=(consumer, producer), daemon=True)
+        consumer_thread.start()
+    else:
+        logger.error("Failed to start Kafka consumers due to initialization errors.")
 
 app.include_router(api_router)
 

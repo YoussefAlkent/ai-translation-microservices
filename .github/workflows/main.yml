@@ -40,3 +40,8 @@ jobs:
     - name: Build containers
       run: |
         docker compose -f docker-compose.yml build
+
+    - name: Storage Post-Install
+      run: |
+        # Print available disk space for debugging
+        df -h
