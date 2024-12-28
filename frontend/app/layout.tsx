@@ -20,7 +20,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geist.className} min-h-screen bg-background`}>
+      <body className={`${geist.className} min-h-screen bg-background`} style={{ fontFamily: `'Geist', 'Times New Roman', serif` }}>
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

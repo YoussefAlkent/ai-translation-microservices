@@ -58,13 +58,6 @@ services:
       - RETRY_DELAY=5
     networks:
       - microservices-network
-    depends_on:
-      jaeger:
-        condition: service_started
-      summarizer:
-        condition: service_started
-      e2a-translator:
-        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -196,7 +189,7 @@ services:
   zookeeper:
     <<: *common-config
     image: bitnami/zookeeper:latest
-    platform: linux/arm64/v8
+    platform: linux/amd64
     ports:
       - "2181:2181"
     environment:
@@ -217,7 +210,7 @@ services:
   kafka:
     <<: *common-config
     image: bitnami/kafka:latest
-    platform: linux/arm64/v8
+    platform: linux/amd64
     ports:
       - "9092:9092"
     environment:
