@@ -230,6 +230,7 @@ services:
       - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
     volumes:
       - kafka_data:/bitnami/kafka
+      - ./init_topics.sh:/bitnami/scripts/init_topics.sh 
     depends_on:
       zookeeper:
         condition: service_healthy
@@ -239,6 +240,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    command: ["/bin/bash", "-c", "/bitnami/scripts/init_topics.sh && /opt/bitnami/scripts/kafka/run.sh"]
     networks:
       - kafka-network
 

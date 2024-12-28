@@ -1,340 +1,377 @@
-from fastapi import FastAPI, HTTPException, Request, Response, Body
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.sdk.resources import Resource
-from pydantic import BaseModel
-import httpx
+from fastapi import FastAPI
+from pydantic import BaseModel, EmailStr
+from confluent_kafka import Producer, Consumer, KafkaError
+from dotenv import load_dotenv
+import json
 import os
+import threading
+import requests
+import uuid
 import time
-from prometheus_client import make_asgi_app, Counter, Histogram
 
-# Initialize tracing
-resource = Resource.create({
-    "service.name": "gateway",
-    "deployment.environment": os.getenv("DEPLOYMENT_ENV", "production")
-})
-trace.set_tracer_provider(TracerProvider(resource=resource))
+load_dotenv()
 
-# Configure OTLP exporter
-otlp_exporter = OTLPSpanExporter(
-    endpoint=f"http://{os.getenv('JAEGER_HOST', 'jaeger')}:4318/v1/traces"
-)
-trace.get_tracer_provider().add_span_processor(
-    BatchSpanProcessor(otlp_exporter)
-)
-tracer = trace.get_tracer(__name__)
-
-# Initialize metrics
-REQUEST_COUNT = Counter(
-    "http_requests_total",
-    "Total HTTP requests",
-    ["method", "endpoint", "status_code"]
-)
-REQUEST_LATENCY = Histogram(
-    "http_request_duration_seconds",
-    "HTTP request duration in seconds",
-    ["method", "endpoint"]
-)
-
-# Initialize rate limiter
-limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="API Gateway")
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Add security middlewares
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.add_middleware(
-    TrustedHostMiddleware, 
-    allowed_hosts=["*"]
-)
-
-# Initialize metrics endpoint
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
-
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    return response
-
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    return response
-
-@app.middleware("http")
-async def monitor_requests(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    duration = time.time() - start_time
-    
-    REQUEST_COUNT.labels(
-        method=request.method,
-        endpoint=request.url.path,
-        status_code=response.status_code
-    ).inc()
-    
-    REQUEST_LATENCY.labels(
-        method=request.method,
-        endpoint=request.url.path
-    ).observe(duration)
-    
-    return response
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": time.time()}
+# Kafka configuration
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP')
 
-SERVICES = {
-    "summarizer": os.getenv("SUMMARIZER_URL", "http://summarizer:8000"),
-    "e2a_translator": os.getenv("E2A_TRANSLATOR_URL", "http://e2a-translator:8000"),
-    "a2e_translator": os.getenv("A2E_TRANSLATOR_URL", "http://a2e-translator:8000")
-}
+# Topic names from environment variables
+KAFKA_LOGIN_TOPIC = os.getenv('KAFKA_LOGIN_TOPIC')
+KAFKA_SIGNUP_TOPIC = os.getenv('KAFKA_SIGNUP_TOPIC')
+KAFKA_E2A_TOPIC = os.getenv('KAFKA_E2A_TOPIC')
+KAFKA_A2E_TOPIC = os.getenv('KAFKA_A2E_TOPIC')
+KAFKA_SUMMARIZATION_TOPIC = os.getenv('KAFKA_SUMMARIZATION_TOPIC')
+KAFKA_LOGIN_RESPONSE_TOPIC = os.getenv('KAFKA_LOGIN_RESPONSE_TOPIC')
+KAFKA_SIGNUP_RESPONSE_TOPIC = os.getenv('KAFKA_SIGNUP_RESPONSE_TOPIC')
+KAFKA_E2A_RESPONSE_TOPIC = os.getenv('KAFKA_E2A_RESPONSE_TOPIC')
+KAFKA_A2E_RESPONSE_TOPIC = os.getenv('KAFKA_A2E_RESPONSE_TOPIC')
+KAFKA_SUMMARIZATION_RESPONSE_TOPIC = os.getenv('KAFKA_SUMMARIZATION_RESPONSE_TOPIC')
 
-# Add SERVICE_PATHS back
-API_VERSION_PREFIX = "/api/v1"
-SERVICE_PATHS = {
-    f"{API_VERSION_PREFIX}/translate/english-to-arabic": ("e2a_translator", "api/v1/translate/en2ar"),
-    f"{API_VERSION_PREFIX}/translate/arabic-to-english": ("a2e_translator", "api/v1/translate/ar2en")
-}
+response_topics = [
+    KAFKA_LOGIN_RESPONSE_TOPIC,
+    KAFKA_SIGNUP_RESPONSE_TOPIC,
+    KAFKA_E2A_RESPONSE_TOPIC,
+    KAFKA_A2E_RESPONSE_TOPIC,
+    KAFKA_SUMMARIZATION_RESPONSE_TOPIC
+]
 
-# Add request/response models
-class SummarizeRequest(BaseModel):
-    text: str
-    style: str = "formal"
-    max_length: int = 500
-    bullet_points: bool = False
+producer_conf = {'bootstrap.servers': KAFKA_BOOTSTRAP}
+producer = Producer(producer_conf)
 
-class SummarizeResponse(BaseModel):
-    summary: str
+def delivery_callback(err, msg):
+    if err:
+        print(f'Message delivery failed: {err}')
+    else:
+        print(f'Message delivered to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
 
-# Remove the SERVICE_PATHS mapping and add specific route handlers
-@app.post("/api/v1/summarize")
-@limiter.limit("100/minute")
-async def summarize(request: Request, text_request: SummarizeRequest):
-    client = httpx.AsyncClient(timeout=60.0)  # Increase timeout
-    with tracer.start_as_current_span(
-        "summarize_request",
-        attributes={"service": "summarizer"}
-    ) as span:
-        try:
-            # Add debug logging
-            print(f"Sending request to summarizer: {SERVICES['summarizer']}/api/v1/summarize")
-            print(f"Request payload: {text_request.dict()}")
-            
-            response = await client.post(
-                f"{SERVICES['summarizer']}/api/v1/summarize",
-                json={
-                    "text": text_request.text,
-                    "style": text_request.style,
-                    "max_length": text_request.max_length,
-                    "bullet_points": text_request.bullet_points
-                },
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json"
-                }
-            )
-            
-            # Add response logging
-            print(f"Summarizer response status: {response.status_code}")
-            print(f"Summarizer response: {response.text}")
-            
-            if response.status_code >= 400:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Summarizer service error: {response.text}"
-                )
-                
-            return response.json()
-            
-        except httpx.HTTPError as e:
-            print(f"HTTP error occurred: {str(e)}")  # Add error logging
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error communicating with summarizer service: {str(e)}"
-            )
-        except Exception as e:
-            print(f"Unexpected error: {str(e)}")  # Add error logging
-            raise HTTPException(
-                status_code=500,
-                detail=f"Unexpected error: {str(e)}"
-            )
-        finally:
-            await client.aclose()
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
 
-@app.get("/api/v1/summarize/status/{request_id}")
-@limiter.limit("100/minute")
-async def get_summary_status(request: Request, request_id: str):  # Added Request parameter
-    client = httpx.AsyncClient(timeout=30.0)
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+
+class E2ATranslationRequest(BaseModel):
+    user_id: int
+    input_text: str
+
+class A2ETranslationRequest(BaseModel):
+    user_id: int
+    input_text: str
+
+class SummarizationRequest(BaseModel):
+    user_id: int
+    input_text: str
+    formality: str
+
+@app.post("/login")
+async def login(login_request: LoginRequest):
     try:
-        response = await client.get(
-            f"{SERVICES['summarizer']}/api/v1/summarize/status/{request_id}",
-            headers={"Accept": "application/json"}
-        )
-        
-        if response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Summary request not found")
-        elif response.status_code >= 400:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Summarizer service error: {response.text}"
-            )
-            
-        return response.json()
-        
-    except httpx.HTTPError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error communicating with summarizer service: {str(e)}"
-        )
-    finally:
-        await client.aclose()
+        # Generate a unique correlation ID
+        correlation_id = str(uuid.uuid4())
 
-# Add specific translation handler
-@app.post("/api/v1/translate/english-to-arabic")
-@limiter.limit("100/minute")
-async def translate_english_to_arabic(request: Request, body: dict):
-    client = httpx.AsyncClient(timeout=60.0)
-    with tracer.start_as_current_span(
-        "translate_request",
-        attributes={"service": "e2a_translator"}
-    ) as span:
-        try:
-            response = await client.post(
-                f"{SERVICES['e2a_translator']}/api/v1/translate/en2ar",
-                json=body,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json"
-                }
-            )
-            
-            if response.status_code >= 400:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Translation service error: {response.text}"
-                )
-                
-            return response.json()
-            
-        except httpx.HTTPError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error communicating with translation service: {str(e)}"
-            )
-        finally:
-            await client.aclose()
+        # Prepare the message with the correlation ID
+        login_data = login_request.model_dump()
+        login_data['correlation_id'] = correlation_id
+        login_request_json = json.dumps(login_data)
 
-# Add auth endpoints
-@app.post("/auth/{action}")
-@limiter.limit("20/minute")
-async def handle_auth(action: str, request: Request):
-    if action not in ["signup", "signin"]:
-        raise HTTPException(status_code=404, detail="Invalid auth endpoint")
-    
-    client = httpx.AsyncClient(timeout=30.0)
+        # Produce the message to Kafka
+        producer.produce(KAFKA_LOGIN_TOPIC, login_request_json.encode('utf-8'), callback=delivery_callback)
+        print(f"Attempting to produce to {KAFKA_BOOTSTRAP}.{KAFKA_LOGIN_TOPIC}")
+        producer.flush()
+
+        # Return the correlation ID to the client
+        return {"status": "success", "message": f"Login request sent to topic '{KAFKA_LOGIN_TOPIC}'.", "correlation_id": correlation_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/signup")
+async def signup(signup_request: SignupRequest):
     try:
-        response = await client.post(
-            f"http://user-service:3001/auth/{action}",
-            json=await request.json(),
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json"
-            }
-        )
-        
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            headers=dict(response.headers)
-        )
-    except httpx.HTTPError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error communicating with auth service: {str(e)}"
-        )
-    finally:
-        await client.aclose()
+        # Generate a unique correlation ID
+        correlation_id = str(uuid.uuid4())
 
-# Keep the generic gateway route for other endpoints
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-@limiter.limit("100/minute")
-async def gateway(path: str, request: Request):
-    # Exclude paths that have specific handlers
-    if path == "api/v1/summarize":
-        raise HTTPException(status_code=404, detail="Use the specific endpoint")
+        # Prepare the message with the correlation ID
+        signup_data = signup_request.model_dump()
+        signup_data['correlation_id'] = correlation_id
+        signup_request_json = json.dumps(signup_data)
+
+        # Produce the message to Kafka
+        producer.produce(KAFKA_SIGNUP_TOPIC, signup_request_json.encode('utf-8'), callback=delivery_callback)
+        print(f"Attempting to produce to {KAFKA_BOOTSTRAP}.{KAFKA_SIGNUP_TOPIC}")
+        producer.flush()
+
+        # Return the correlation ID to the client
+        return {"status": "success", "message": f"Signup request sent to topic '{KAFKA_SIGNUP_TOPIC}'.", "correlation_id": correlation_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/e2a")
+async def e2a_translation(e2a_request: E2ATranslationRequest):
+    try:
+        # Generate a unique correlation ID
+        correlation_id = str(uuid.uuid4())
+
+        # Prepare the message with the correlation ID
+        e2a_data = e2a_request.model_dump()
+        e2a_data['correlation_id'] = correlation_id
+        e2a_request_json = json.dumps(e2a_data)
+
+        # Produce the message to Kafka
+        producer.produce(KAFKA_E2A_TOPIC, e2a_request_json.encode('utf-8'), callback=delivery_callback)
+        print(f"Attempting to produce to {KAFKA_BOOTSTRAP}.{KAFKA_E2A_TOPIC}")
+        producer.flush()
+
+        # Return the correlation ID to the client
+        return {"status": "success", "message": f"E2A translation request sent to topic '{KAFKA_E2A_TOPIC}'.", "correlation_id": correlation_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     
-    full_path = f"/{path}"
+@app.post("/a2e")
+async def a2e_translation(a2e_request: A2ETranslationRequest):
+    try:
+        # Generate a unique correlation ID
+        correlation_id = str(uuid.uuid4())
+
+        # Prepare the message with the correlation ID
+        a2e_data = a2e_request.model_dump()
+        a2e_data['correlation_id'] = correlation_id
+        a2e_request_json = json.dumps(a2e_data)
+
+        # Produce the message to Kafka
+        producer.produce(KAFKA_A2E_TOPIC, a2e_request_json.encode('utf-8'), callback=delivery_callback)
+        producer.flush()
+
+        # Return the correlation ID to the client
+        return {"status": "success", "message": f"A2E translation request sent to topic '{KAFKA_A2E_TOPIC}'.", "correlation_id": correlation_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     
-    # Match service path
-    service_info = None
-    for pattern, info in SERVICE_PATHS.items():
-        if full_path.startswith(pattern):
-            service_info = info
-            break
+@app.post("/summarization")
+async def summarization(summarization_request: SummarizationRequest):
+    try:
+        # Generate a unique correlation ID
+        correlation_id = str(uuid.uuid4())
+
+        # Prepare the message with the correlation ID
+        summarization_data = summarization_request.model_dump()
+        summarization_data['correlation_id'] = correlation_id
+        summarization_request_json = json.dumps(summarization_data)
+
+        # Produce the message to Kafka
+        producer.produce(KAFKA_SUMMARIZATION_TOPIC, summarization_request_json.encode('utf-8'), callback=delivery_callback)
+        producer.flush()
+
+        # Return the correlation ID to the client
+        return {"status": "success", "message": f"Summarization request sent to topic '{KAFKA_SUMMARIZATION_TOPIC}'.", "correlation_id": correlation_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     
-    if not service_info:
-        raise HTTPException(status_code=404, detail="Service not found")
-    
-    service_name, service_path = service_info
-    if service_name not in SERVICES:
-        raise HTTPException(status_code=404, detail="Service not found")
-    
-    client = httpx.AsyncClient(timeout=30.0)  # Increase timeout to 30 seconds
-    with tracer.start_as_current_span(
-        "gateway_request",
-        attributes={
-            "service": service_name,
-            "path": path,
-            "method": request.method,
+
+
+def consume_responses():
+    def run_consumer():
+        # Initialize the consumer inside the thread
+        consumer_conf = {
+            'bootstrap.servers': KAFKA_BOOTSTRAP,
+            'group.id': 'gateway_consumers',
+            'auto.offset.reset': 'earliest'
         }
-    ) as span:
+        consumer = Consumer(consumer_conf)
+        consumer.subscribe(response_topics)
         try:
-            url = f"{SERVICES[service_name]}/{service_path}"
-            response = await client.request(
-                method=request.method,
-                url=url,
-                headers=request.headers,
-                content=await request.body()
-            )
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers=dict(response.headers)
-            )
-        except httpx.TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail="Request timed out while processing"
-            )
+            print("Subscribed to respone topics")
+            while True:
+                msg = consumer.poll(1.0)  # Timeout in seconds
+                if msg is None:
+                    continue
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        # End of partition event
+                        continue
+                    else:
+                        # Handle other errors
+                        print(f"Consumer error: {msg.error()}")
+                        continue
+
+                # Dispatch message to appropriate handler based on topic
+                topic = msg.topic()
+                message_value = msg.value().decode('utf-8')
+
+                if topic == KAFKA_LOGIN_RESPONSE_TOPIC:
+                    handle_login_response(message_value)
+                elif topic == KAFKA_SIGNUP_RESPONSE_TOPIC:
+                    handle_signup_response(message_value)
+                elif topic == KAFKA_E2A_RESPONSE_TOPIC:
+                    handle_e2a_translation_response(message_value)
+                elif topic == KAFKA_A2E_RESPONSE_TOPIC:
+                    handle_a2e_translation_response(message_value)
+                elif topic == KAFKA_SUMMARIZATION_RESPONSE_TOPIC:
+                    handle_summarization_response(message_value)
+                else:
+                    print(f"Received message from unknown topic {topic}: {message_value}")
+
         except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=str(e)
-            )
+            print(f"Error in consumer: {e}")
         finally:
-            await client.aclose()
+            consumer.close()
+
+    threading.Thread(target=run_consumer, daemon=True).start()
+
+# Login Handling
+
+def handle_login_response(message_value):
+    # Parse the message
+    response = json.loads(message_value)
+    correlation_id = response.get('correlation_id')
+
+    if not correlation_id:
+        print("Correlation ID missing in login response")
+        return
+
+    # Send the response as JSON to http://os.getenv('FRONTEND_ROUTE')/exampleemail@xyz/login
+    url = f'http://{os.getenv('FRONTEND_ROUTE')}/{response.get('email')}/login'
+    print("attempting to send login response to frontend")
+    try:
+        r = requests.post(url, json=response)
+        r.raise_for_status()
+        print(f"Login response forwarded to frontend: {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to forward login response to frontend: {e}")
+
+# Signup Handling
+
+def handle_signup_response(message_value):
+    # Parse the message
+    response = json.loads(message_value)
+    correlation_id = response.get('correlation_id')
+    if not correlation_id:
+        print("Correlation ID missing in signup response")
+        return
+
+    # Send the response as JSON to  http://os.getenv('FRONTEND_ROUTE')/exampleemail@xyz/signup
+    url = f'http://{os.getenv('FRONTEND_ROUTE')}/{response.get('email')}/signup'
+    try:
+        r = requests.post(url, json=response)
+        r.raise_for_status()
+        print(f"Signup response forwarded to frontend: {r.status_code}")
+
+    except requests.exceptions.RequestException as e:
+
+        print(f"Failed to forward signup response to frontend: {e}")
+
+#E2A Translation Handling
+
+def handle_e2a_translation_response(message_value):
+    # Parse the message
+    response = json.loads(message_value)
+    user_id = response.get('user_id')
+    chat_id = response.get('chat_id')
+    input_text = response.get('input_text')
+    output_text = response.get('output_text')
+
+    if not user_id:
+        print("user_id missing in E2A translation response")
+        return
+
+    # Construct the URL
+    url = f'http://{os.getenv('FRONTEND_ROUTE')}/{user_id}/e2a'
+
+    # Prepare the payload
+    payload = {
+        'chat_id': chat_id,
+        'input_text': input_text,
+        'output_text': output_text
+    }
+
+    # Send the output_text to the frontend
+    try:
+        r = requests.post(url, json=payload)
+        r.raise_for_status()
+        print(f"E2A translation response forwarded to frontend: {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to forward E2A translation response to frontend: {e}")
+
+# A2E Translation Handling
+
+def handle_a2e_translation_response(message_value):
+    # Parse the message
+    response = json.loads(message_value)
+    user_id = response.get('user_id')
+    chat_id = response.get('chat_id')
+    input_text = response.get('input_text')
+    output_text = response.get('output_text')
+
+    if not user_id:
+        print("user_id missing in A2E translation response")
+        return
+
+    # Construct the URL
+    url = f'http://{os.getenv('FRONTEND_ROUTE')}/{user_id}/a2e'
+
+    # Prepare the payload
+    payload = {
+        'chat_id': chat_id,
+        'input_text': input_text,
+        'output_text': output_text
+    }
+
+    # Send the output_text to the frontend
+    try:
+        r = requests.post(url, json=payload)
+        r.raise_for_status()
+        print(f"A2E translation response forwarded to frontend: {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to forward A2E translation response to frontend: {e}")
+
+#Summarization Handling
+
+def handle_summarization_response(message_value):
+    # Parse the message
+    response = json.loads(message_value)
+    user_id = response.get('user_id')
+    chat_id = response.get('chat_id')
+    input_text = response.get('input_text')
+    output_text = response.get('output_text')
+    formality = response.get('formality')
+
+    if not user_id:
+        print("user_id missing in summarization response")
+        return
+
+    # Construct the URL
+    url = f'http://{os.getenv('FRONTEND_ROUTE')}/{user_id}/summarization'
+
+    # Prepare the payload
+    payload = {
+        'chat_id': chat_id,
+        'input_text': input_text,
+        'output_text': output_text,
+        'formality': formality
+    }
+
+    # Send the output_text and formality to the frontend
+    try:
+        r = requests.post(url, json=payload)
+        r.raise_for_status()
+        print(f"Summarization response forwarded to frontend: {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to forward summarization response to frontend: {e}")
+
+
+@app.on_event("startup")
+def startup_event():
+    consume_responses()
+
+@app.on_event("shutdown")
+def shutdown_event():
+    producer.flush()
 
 if __name__ == "__main__":
     import uvicorn
