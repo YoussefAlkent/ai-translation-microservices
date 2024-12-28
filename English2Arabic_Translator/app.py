@@ -46,6 +46,7 @@ model = MarianMTModel.from_pretrained(os.getenv('MODEL_DIRECTORY', './model'))
 tokenizer = MarianTokenizer.from_pretrained(os.getenv('MODEL_DIRECTORY', './model'))
 
 class TranslationRequest(BaseModel):
+    correlation_id: str
     user_id: str
     chat_id: str
     text: str
@@ -130,23 +131,23 @@ def consume_and_process_kafka_messages(consumer, producer):
             logger.info(f"Consumed message: {message}")
 
             # Extract data
-            user_id = message.get("user_id")
-            chat_id = message.get("chat_id")
-            text = message.get("text")
+            request_data = message.value
+            request = TranslationRequest(**request_data)
 
             if not user_id or not chat_id or not text:
                 logger.error("Invalid message format received, skipping.")
                 continue
 
             # Generate translation
-            prompt = f">>ara<< {text}"
+            prompt = f">>ara<< {request.text}"
             translation = generate_translation(prompt)
 
             # Send the result to the response topic
             result = {
-                "user_id": user_id,
-                "chat_id": chat_id,
-                "text": text,
+                'correlation_id': request.correlation_id,
+                "user_id": request.user_id,
+                "chat_id": request.chat_id,
+                "text": request.text,
                 "translation": translation,
             }
             send_to_kafka(producer, result)

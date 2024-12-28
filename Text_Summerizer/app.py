@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from cachetools import TTLCache
-from kafka import KafkaProducer
+from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import KafkaError
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -10,7 +10,6 @@ import ollama
 import logging
 import asyncio
 import json
-import time
 import os
 from contextlib import asynccontextmanager
 from shared.base_service import BaseService
@@ -22,13 +21,17 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    app.state.kafka_producer = await init_kafka()
-    logger.info("Kafka producer initialized")
+    app.state.kafka_producer = await init_kafka_producer()
+    app.state.kafka_consumer = await init_kafka_consumer()
+    logger.info("Kafka producer and consumer initialized")
     yield
     # Shutdown
     if hasattr(app.state, 'kafka_producer'):
         app.state.kafka_producer.close()
         logger.info("Kafka producer closed")
+    if hasattr(app.state, 'kafka_consumer'):
+        app.state.kafka_consumer.close()
+        logger.info("Kafka consumer closed")
 
 service = BaseService("text_summarizer")
 app = service.app
@@ -42,6 +45,9 @@ logger = logging.getLogger(__name__)
 summary_cache = TTLCache(maxsize=100, ttl=3600)
 
 class SummaryRequest(BaseModel):
+    correlation_id: str
+    user_id: str
+    chat_id: str
     text: str
     style: str = "formal"
     max_length: int = 500
@@ -124,7 +130,7 @@ def generate_completion(prompt: str) -> str:
             logger.error(f"Circuit breaker: {str(e)}")
             raise
 
-async def init_kafka():
+async def init_kafka_producer():
     try:
         return KafkaProducer(
             bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092'),
@@ -136,24 +142,38 @@ async def init_kafka():
         logger.error(f"Kafka initialization error: {e}")
         return None
 
-async def send_to_kafka(producer, message):
-    if not producer:
-        return
+async def init_kafka_consumer():
     try:
-        future = producer.send('summarizer_requests', message)  # Changed topic name
-        await asyncio.get_event_loop().run_in_executor(None, future.get, 60)
-    except Exception as e:
-        logger.error(f"Kafka send error: {e}")
+        consumer = KafkaConsumer(
+            'summarizer_requests',  # Consumer listens to this topic
+            bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092'),
+            group_id='summarizer-group',
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            auto_offset_reset='earliest'
+        )
+        asyncio.create_task(consume_summarization_requests(consumer))
+        return consumer
+    except KafkaError as e:
+        logger.error(f"Kafka initialization error: {e}")
+        return None
 
-api_router = APIRouter(prefix="/api/v1")
-
-async def process_summary(request: SummaryRequest, request_id: str, cache_key: str):
-    try:
-        style_prompt = STYLE_PROMPTS.get(request.style, STYLE_PROMPTS["formal"])
-        max_length_instruction = f"\nLimit the summary to approximately {request.max_length} characters."
-        bullet_points_instruction = "\nUse bullet points for main ideas." if request.bullet_points else ""
-        
-        prompt = f"""Based on the following style guide:
+async def consume_summarization_requests(consumer: KafkaConsumer):
+    for message in consumer:
+        try:
+            request_data = message.value
+            logger.info(f"Received request from Kafka: {request_data}")
+            
+            # Generate the summary based on the request
+            request = SummaryRequest(**request_data)
+            request_id = str(uuid.uuid4())
+            cache_key = hashlib.md5(f"{request.text}{request.style}{request.max_length}{request.bullet_points}".encode()).hexdigest()
+            
+            # Process summary request
+            style_prompt = STYLE_PROMPTS.get(request.style, STYLE_PROMPTS["formal"])
+            max_length_instruction = f"\nLimit the summary to approximately {request.max_length} characters."
+            bullet_points_instruction = "\nUse bullet points for main ideas." if request.bullet_points else ""
+            
+            prompt = f"""Based on the following style guide:
 {style_prompt}
 
 {max_length_instruction}
@@ -163,39 +183,51 @@ Text to summarize:
 {request.text}
 
 Provide a concise summary:"""
-        
-        summary = generate_completion(prompt)
-        
-        # Trim summary if it exceeds max_length
-        if len(summary) > request.max_length:
-            summary = summary[:request.max_length].rsplit(' ', 1)[0] + '...'
-        
-        result = {
-            "summary": summary,
-            "style": request.style,
-            "bullet_points": request.bullet_points,
-            "length": len(summary),
-            "truncated": len(summary) < len(generate_completion(prompt))
-        }
-        
-        summary_cache[cache_key] = result
-        
-        if hasattr(app.state, 'kafka_producer'):
+            
+            summary = generate_completion(prompt)
+            
+            # Trim summary if it exceeds max_length
+            if len(summary) > request.max_length:
+                summary = summary[:request.max_length].rsplit(' ', 1)[0] + '...'
+            
+            result = {
+                "summary": summary,
+                "style": request.style,
+                "bullet_points": request.bullet_points,
+                "length": len(summary),
+                "truncated": len(summary) < len(generate_completion(prompt))
+            }
+            
+            summary_cache[cache_key] = result
+            summary_status[request_id] = {"status": "completed", "result": result}
+            
+            # Send the result to the response topic
             await send_to_kafka(
                 app.state.kafka_producer,
                 {
-                    'text': request.text,
-                    'style': request.style,
-                    'timestamp': time.time(),
-                    'cache_key': cache_key
-                }
+                    'correlation_id': request.correlation_id,
+                    'user_id': request.user_id,
+                    'chat_id': request.chat_id,
+                    'input_text': request.text,
+                    'output_text': result['summary'],
+                    'status': 'completed',
+                    'formality': request.style
+                },
+                'summarization-response'  # The topic for responses
             )
-        
-        summary_status[request_id] = {"status": "completed", "result": result}
-        
+        except Exception as e:
+            logger.error(f"Error processing Kafka message: {str(e)}")
+
+async def send_to_kafka(producer, message, topic):
+    if not producer:
+        return
+    try:
+        future = producer.send(topic, message)
+        await asyncio.get_event_loop().run_in_executor(None, future.get, 60)
     except Exception as e:
-        logger.error(f"Error processing summary: {str(e)}")
-        summary_status[request_id] = {"status": "error", "error": str(e)}
+        logger.error(f"Kafka send error: {e}")
+
+api_router = APIRouter(prefix="/api/v1")
 
 @api_router.post("/summarize")
 async def summarize_text(request: SummaryRequest, background_tasks: BackgroundTasks):

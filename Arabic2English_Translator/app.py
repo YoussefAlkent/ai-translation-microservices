@@ -49,6 +49,9 @@ model = MarianMTModel.from_pretrained(os.getenv('MODEL_DIRECTORY', './model'))
 tokenizer = MarianTokenizer.from_pretrained(os.getenv('MODEL_DIRECTORY', './model'))
 
 class TranslationRequest(BaseModel):
+    correlation_id: str
+    user_id: str
+    chat_id: str
     text: str
 
 class TranslationStatus(BaseModel):
@@ -131,22 +134,22 @@ async def consume_kafka_messages(consumer):
                 message = json.loads(msg.value().decode('utf-8'))
 
                 # Extract the necessary fields from the consumed message
-                user_id = message.get("user-id")
-                chat_id = message.get("chat-id")
-                input_text = message.get("text")
+                request_data = message.value
+                request = TranslationRequest(**request_data)
 
-                if not user_id or not chat_id or not input_text:
+                if not request.user_id or not request.chat_id or not request.text:
                     logger.error("Missing required fields in the message.")
                     continue
 
                 # Generate the output text (translation in this case)
-                output_text = generate_translation(input_text)
+                output_text = generate_translation(request.text)
 
                 # Prepare the response message with user-id, chat-id, input text, and output text
                 response_message = {
-                    'user-id': user_id,
-                    'chat-id': chat_id,
-                    'input-text': input_text,
+                    'correlation-id': request.correlation_id,
+                    'user-id': request.user_id,
+                    'chat-id': request.chat_id,
+                    'input-text': request.text,
                     'output-text': output_text
                 }
 
