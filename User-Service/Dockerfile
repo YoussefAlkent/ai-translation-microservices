@@ -10,13 +10,13 @@ RUN apt-get update && apt-get install -y \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy Python dependencies
-COPY User-Service/requirements.txt .
+COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
-COPY User-Service/. .
+COPY . .
 
 # Expose the port for Uvicorn
 EXPOSE 8000
